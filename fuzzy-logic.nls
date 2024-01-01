@@ -1,0 +1,2619 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; GNU GENERAL PUBLIC LICENSE ;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; fuzzy-logic.nls
+;; fuzzy-logic.nls is a set of functions designed to facilitate 
+;; the use of fuzzy logic within NetLogo. Version 1.2
+;; 
+;; Copyright (C) 2015 Luis R. Izquierdo
+;; 
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;;
+;; Contact information:
+;; Luis R. Izquierdo 
+;;   University of Burgos, Spain. 
+;;   e-mail: lrizquierdo@ubu.es
+
+
+globals [
+  $fuzzy-creator
+  $fuzzy-resolution
+  $undefined-degree-of-membership
+  $undefined-degree-of-fulfilment
+]
+
+breed [fuzzy-sets fuzzy-set]
+
+fuzzy-sets-own [
+  $description
+  $membership-function
+  $membership-function-parameters 
+    ;; list with all the parameters of the membership function
+  $continuous?
+  $universe
+    ;; variable that contains the domain of the membership function,
+    ;; i.e. the elements for which the membership function is defined.
+  $dependent-temporary-sets
+]
+
+to fuzzy-start
+  set $fuzzy-resolution 32
+  set $undefined-degree-of-membership "undefined"
+  set $undefined-degree-of-fulfilment "undefined"
+  
+  ;; We create one empty fuzzy set who is going to be 
+  ;; the creator of the rest (by hatching).
+  ;; We do it this way so you can create fuzzy sets in
+  ;; an observer context and in a turtle/patch/link context.  
+  if not is-turtle? $fuzzy-creator[
+    create-fuzzy-sets 1 [
+      set hidden? true
+      set $description "creator"
+      set label "creator"
+      set $membership-function (task $creator-membership-function)
+      set $fuzzy-creator self
+      set $dependent-temporary-sets []
+    ]  
+  ]
+end 
+
+to-report fuzzy-empty-set  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label "empty fuzzy set"
+    set $continuous? true
+    set $universe []
+    set hidden? true
+    set $description "empty fuzzy set"
+    set $new-set self
+  ]]  
+  report $new-set
+end
+
+to fuzzy-die
+  if length $dependent-temporary-sets > 0 [foreach $dependent-temporary-sets [ask ? [die]]]
+  ask self [ die ]
+end
+
+;;;;;;;;;;;;;;;;
+;; EVALUATION ;;
+;;;;;;;;;;;;;;;;
+
+to-report fuzzy-evaluation [$x]
+  report ifelse-value is-list? $x 
+    [map [$single-evaluation ?] $x] 
+    [$single-evaluation $x]
+end
+
+to-report fuzzy-evaluation-of [$set $x]
+  report ifelse-value is-list? $x 
+    [map [[$single-evaluation ?] of $set] $x] 
+    [[$single-evaluation $x] of $set]
+end
+
+to-report $single-evaluation [$x]
+  report ifelse-value (is-fuzzy-set? $x) 
+    [fuzzy-degree-of-fulfillment self $x]
+    [(run-result $membership-function $membership-function-parameters $x)]
+end
+
+to-report $single-evaluation-number [$x]
+  report (run-result $membership-function $membership-function-parameters $x)
+end
+
+;;;;;;;;;;;;;;;;;;;;;
+;; DEFUZZIFICATION ;;
+;;;;;;;;;;;;;;;;;;;;;
+
+to-report fuzzy-COG
+  let $center 0
+  
+   ifelse $universe = [] 
+     [
+       show "You have tried to compute the center of gravity of an empty set"
+       set $center "center of gravity of an empty set"
+     ]
+     [
+       ifelse $continuous? 
+       [ 
+         ifelse $description = "piecewise-linear" [ 
+      
+           ;; Masses:
+           ;; Integrate[y1 + (x - x1) (y2 - y1)/(x2 - x1), {x, x1, x2}]
+           ;; = (x2 - x1) * (y1 + y2) / 2
+           
+           ;; Centers
+           ;; Integrate[(y1 + (x - x1) (y2 - y1)/(x2 - x1)) x, {x, x1, x2}] 
+           ;; / Integrate[y1 + (x - x1) (y2 - y1)/(x2 - x1), {x, x1, x2}]
+           
+           ;; Centers * Masses
+           ;; = Integrate[(y1 + (x - x1) (y2 - y1)/(x2 - x1)) x, {x, x1, x2}] 
+           ;; = (x2 - x1) * (x1 * (2y1 + y2) + x2 * (y1 + 2y2)) / 6
+           
+           let $xs map first $membership-function-parameters
+           let $ys map last $membership-function-parameters
+           let $masses-times-2 (map [(?2 - ?1) * (?3 + ?4)] (but-last $xs) (but-first $xs) (but-last $ys) (but-first $ys)) 
+           let $centers-times-masses-times-6 (map [(?2 - ?1) * ( ?1 * (2 * ?3 + ?4) + ?2 * (?3 + 2 * ?4))] (but-last $xs) (but-first $xs) (but-last $ys) (but-first $ys))
+           let $mass-times-2 sum $masses-times-2
+           ifelse ($mass-times-2 = 0)
+             [ 
+               set $center (first $universe + last $universe) / 2 
+               show (word "You have tried to compute the center of gravity of a set without mass. I have returned the middle of the universe " $universe " as an answer: " $center)
+             ]
+             [ set $center sum $centers-times-masses-times-6 / ( 3 * $mass-times-2) ]
+         ] 
+     
+         [
+           let $x (first $universe) + (1.0 / (2 * $fuzzy-resolution))
+           let $v 0
+           let $mass-times-resolution 0
+           let $centers-times-v 0
+           
+           let $lu (last $universe)
+           while [ $x < $lu ] [
+             set $v ($single-evaluation-number $x)
+             set $mass-times-resolution ($mass-times-resolution + $v)
+             set $centers-times-v ($centers-times-v + $v * $x)       
+             set $x ($x + (1.0 / $fuzzy-resolution))
+           ]
+           
+           ifelse ($mass-times-resolution = 0)
+             [ 
+               set $center (first $universe + last $universe) / 2 
+               show (word "You have tried to compute the center of gravity of a set without mass. I have returned the middle of the universe " $universe " as an answer: " $center)
+             ]
+             [ set $center ($centers-times-v / $mass-times-resolution) ]
+         ]
+       ]
+    
+       ;; discrete functions
+       [
+         let $xs map first $membership-function-parameters
+         let $ys map last $membership-function-parameters
+         set $center (sum (map [?1 * ?2] $xs $ys)) / sum $ys
+       ] 
+     ]
+     
+   report $center
+end
+
+to-report fuzzy-COG-of [$set]
+  report [fuzzy-COG] of $set 
+end
+
+;; FOM: First of maximum
+to-report fuzzy-FOM
+  let $maximum "nothing"
+  
+  ifelse $universe = [] 
+    [
+      show "You have tried to compute the FOM of an empty set"
+      set $maximum "FOM of an empty set"
+    ]
+  
+    [
+      ifelse $continuous? and ($description != "piecewise-linear") 
+      [
+        let $x (first $universe)
+        let $max-value -1      
+        let $v 0
+        let $lu (last $universe)
+        
+        while [ $x <= $lu ] [
+          set $v ($single-evaluation-number $x)
+          if $v > $max-value [
+            set $maximum $x
+            set $max-value $v
+          ]    
+          set $x ($x + (1.0 / $fuzzy-resolution))
+        ]
+      ]
+    
+      [ ;; discrete functions and piecewise-linear
+        let $max-value -1
+        foreach $membership-function-parameters [
+          if last ? > $max-value [
+            set $maximum (first ?)
+            set $max-value (last ?)
+          ]
+        ]
+      ]
+    ]
+ 
+  report $maximum
+end
+
+to-report fuzzy-FOM-of [$set]
+  report [fuzzy-FOM] of $set 
+end
+
+;; LOM: Last of maximum
+to-report fuzzy-LOM
+  let $maximum "nothing"
+  ifelse $universe = [] 
+    [
+      show "You have tried to compute the LOM of an empty set"
+      set $maximum "LOM of an empty set"
+    ]
+
+    [
+      ifelse $continuous? and ($description != "piecewise-linear") 
+      [ 
+        let $x (first $universe)
+        let $max-value -1      
+        let $v 0
+        
+        let $lu (last $universe)
+        while [ $x <= $lu ] [
+          set $v ($single-evaluation-number $x)
+          if $v >= $max-value [
+            set $maximum $x
+            set $max-value $v
+          ]    
+          set $x ($x + (1.0 / $fuzzy-resolution))
+        ]
+      ]
+    
+      [ ;; discrete functions and piecewise-linear
+        let $max-value -1
+        foreach $membership-function-parameters [
+          if last ? >= $max-value [
+            set $maximum (first ?)
+            set $max-value (last ?)
+          ]
+        ]
+      ]
+    ]
+  report $maximum
+end
+
+to-report fuzzy-LOM-of [$set]
+  report [fuzzy-LOM] of $set 
+end
+
+
+;; MOM: Middle of maximum
+;; Returns the average of the first x where the maximum is achieved 
+;; and the last x where the maximum is achieved, even if the membership
+;; function takes lower values in between. 
+to-report fuzzy-MOM
+  let $x1 0 let $x2 0
+  let $found-two? false
+  
+  ifelse $universe = [] 
+    [
+      show "You have tried to compute the MOM of an empty set"
+      report "MOM of an empty set"
+    ]
+  
+    [
+      ifelse $continuous? and ($description != "piecewise-linear") 
+      [
+        let $x (first $universe)
+        let $max-value -1      
+        let $v 0
+        
+        let $lu (last $universe)
+        while [ $x < $lu ] [
+          set $v ($single-evaluation-number $x)
+          ifelse $v > $max-value 
+          [
+            set $x1 $x
+            set $max-value $v
+            set $found-two? false
+          ]
+          [ 
+            if $v = $max-value [
+              set $x2 $x
+              set $found-two? true
+            ] 
+          ]    
+          set $x ($x + (1.0 / $fuzzy-resolution))
+        ]
+      ]
+    
+      [ ;; discrete functions and piecewise-linear
+        let $max-value -1
+        foreach $membership-function-parameters [
+          ifelse last ? > $max-value 
+          [
+            set $x1 (first ?)
+            set $max-value (last ?)
+            set $found-two? false
+          ]
+          [
+            if last ? = $max-value [
+              set $x2 (first ?)
+              set $found-two? true
+            ] 
+          ]
+        ]
+      ]
+    ]
+  
+  report ifelse-value $found-two? [($x1 + $x2) / 2][$x1]
+end
+
+to-report fuzzy-MOM-of [$set]
+  report [fuzzy-MOM] of $set 
+end
+
+
+;; MeOM: Mean of maximum
+;; Returns the average of the whole interval where the maximum is achieved. 
+to-report fuzzy-MeOM
+  let $mean-of-max 0
+  
+  ifelse $universe = [] 
+    [
+      show "You have tried to compute the MeOM of an empty set"
+      set $mean-of-max "MeOM of an empty set"
+    ]
+    [ 
+      ifelse $continuous? and ($description != "piecewise-linear") 
+      [ 
+        let $x (first $universe)
+        let $max-value -1      
+        let $v 0
+        let $number-of-samples 0
+        
+        let $lu (last $universe)
+        while [ $x < $lu ] [
+          set $v ($single-evaluation-number $x)
+          ifelse $v > $max-value 
+          [
+            set $mean-of-max $x
+            set $number-of-samples 1
+            set $max-value $v
+          ]
+          [ 
+            if $v = $max-value [
+              set $mean-of-max ($mean-of-max + $x)
+              set $number-of-samples ($number-of-samples + 1)
+            ] 
+          ]       
+          set $x ($x + (1.0 / $fuzzy-resolution)) 
+        ]
+        set $mean-of-max ($mean-of-max / $number-of-samples)
+      ]
+   
+      [ ;; discrete functions and piecewise-linear
+        let $max-value max map [last ?] $membership-function-parameters
+        let $discrete-mode? false
+        
+        if ($description = "piecewise-linear") [      
+          let $i1 0 let $i2 0 let $inside? false
+          let $x 0 let $y 0
+          let $intervals [] 
+          let $i 1 let $l length $membership-function-parameters
+          foreach $membership-function-parameters [
+            set $x first ?
+            set $y last ?
+            ifelse $y = $max-value
+            [
+              ifelse $inside? 
+              [ set $i2 $x ]
+              [ set $i1 $x set $inside? true ]
+            ]
+            [ ;; y < max-value
+              if $inside? and $i2 > $i1 [set $intervals lput (list $i1 $i2) $intervals]
+              set $inside? false
+            ]
+            if $i = $l and $inside? and $i2 > $i1 [set $intervals lput (list $i1 $i2) $intervals]
+            set $i ($i + 1)
+          ]
+          ifelse length $intervals = 0 
+          [ set $discrete-mode? true ]
+          [ set $mean-of-max (sum map [(last ? - first ?) * (last ? + first ?) / 2] $intervals) / sum map [(last ? - first ?)] $intervals ]        
+        ]
+        
+        if ($description = "discrete") or $discrete-mode? [
+          let $maxima filter [last ? = $max-value] $membership-function-parameters 
+          set $mean-of-max (sum map [first ?] $maxima) / length $maxima
+        ]
+      ]
+    ]
+
+  report $mean-of-max
+end
+
+to-report fuzzy-MeOM-of [$set]
+  report [fuzzy-MeOM] of $set 
+end
+
+;;;;;;;;;;;;;;;
+;; RETRIEVAL ;;
+;;;;;;;;;;;;;;;
+
+to-report fuzzy-set-with-label [$l]
+  let $all (fuzzy-sets with [label = $l])
+  if count $all > 1 [user-message (word "There is more than one fuzzy set with label " $l)]
+  report one-of $all 
+end
+
+
+;;;;;;;;;;;;;
+;; DRAWING ;;
+;;;;;;;;;;;;;
+
+to fuzzy-plot [$set]
+ ask $set [$fuzzy-plot-yourself] 
+end
+
+to $fuzzy-plot-yourself 
+  if $universe = 0 [
+    user-message (word 
+      "No $universe has been defined for this fuzzy set.\nYou can do it by typing: \nask FS \"" label "\" [set $universe [a b]].")
+    stop
+  ]
+  if $continuous? = 0 [
+    user-message (word 
+      "It has not been specified whether this fuzzy set is continuous or not.\nYou can do it by typing: \nask FS \"" label "\" [set $continuous? true / false].")
+    stop
+  ]
+  
+  ifelse $universe = [] 
+  [
+    show "Empty fuzzy set has been asked to be drawn"
+  ]
+  [
+    ;; set is not empty
+    
+    ;; The following code sets the range of the plot.
+    ;; This can be done from NetLogo, so we comment it out.
+    ;; (The user can use set Auto scale? on witin the plot)
+    
+;  let $min-range (first $universe)
+;  let $max-range (last $universe)
+;  
+;  if plot-x-min <= $min-range [set $min-range plot-x-min]
+;  if plot-x-max >= $max-range [set $max-range plot-x-max]
+;  
+;  ifelse $min-range = $max-range
+;    [ set-plot-x-range 0 (2 * $min-range)]
+;    [ set-plot-x-range $min-range $max-range ]
+;       
+;  set-plot-y-range 0 1
+  
+  ifelse $continuous? 
+  [
+    
+    ifelse $description = "piecewise-linear" [ 
+      set-plot-pen-mode 0
+      plot-pen-up
+      let $previous-x "nothing"
+      foreach $membership-function-parameters [
+        let $x (first ?)
+        if $x = $previous-x [plot-pen-up]
+        plotxy $x (last ?)
+        plot-pen-down
+        set $previous-x $x
+      ]
+    ] 
+    
+    [
+      let $x (first $universe)
+      set-plot-pen-mode 2
+      plot-pen-up
+      
+      let $lu (last $universe)
+      while [ $x <= $lu ] [
+        plotxy $x ($single-evaluation-number $x)
+        plot-pen-down
+        set $x ($x + (1.0 / $fuzzy-resolution))
+      ]
+        
+      ;; The following implementation is equivalent, 
+      ;; but is more problematic because of the effect of
+      ;; floating-point errors 
+      ;; (potentially leading to $x > (last $universe))
+;      let $steps floor (1 + ((last $universe) - (first $universe)) * $fuzzy-resolution)
+;      repeat $steps [
+;        plotxy $x ($single-evaluation-number $x)
+;        plot-pen-down
+;        set $x ($x + (1.0 / $fuzzy-resolution))
+;      ]
+      
+    ]
+  ]
+  
+  ;; discrete functions
+  [
+    set-plot-pen-mode 0
+    foreach $membership-function-parameters [
+      let $x (first ?)
+      plot-pen-up
+      plotxy $x 0
+      plot-pen-down
+      plotxy $x (last ?)
+    ]
+  ]
+   
+  ]
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DEGREES OF FULFILLMENT ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;; fuzzy-degree-of-fulfillment [A B]
+  ;; A and B are fuzzy sets
+to-report fuzzy-degree-of-fulfillment [$A $B]
+  if ([$continuous?] of $A and [$continuous?] of $B) [
+    ifelse (([$description] of $A = "piecewise-linear") and ([$description] of $B = "piecewise-linear")) 
+    [report $degree-of-fulfillment-piecewise-linear $A $B]
+    [report $degree-of-fulfillment-continuous $A $B]
+  ]
+  if ((not [$continuous?] of $A) and (not [$continuous?] of $B)) [
+    report $degree-of-fulfillment-discrete $A $B
+  ]
+  report $degree-of-fulfillment-mixed $A $B
+end
+
+
+;; DEGREE-OF-FULFILLMENT-DISCRETE [A B]
+  ;; A and B are discrete fuzzy sets
+to-report $degree-of-fulfillment-discrete [$A $B]
+  let $degree $undefined-degree-of-membership
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements-of-B [$membership-function-parameters] of $B
+  while [(length $elements-of-A > 0) and (length $elements-of-B > 0)] [
+   let $element-of-A first $elements-of-A
+   let $element-of-B first $elements-of-B
+   ifelse (first $element-of-A = first $element-of-B) 
+   [
+     if ($degree = $undefined-degree-of-membership) [set $degree 0]
+     let $va last $element-of-A
+     let $vb last $element-of-B
+     let $minimum ifelse-value ($va < $vb) [$va][$vb]
+     if ($degree < $minimum) [set $degree $minimum]
+     set $elements-of-A but-first $elements-of-A
+     set $elements-of-B but-first $elements-of-B
+   ]
+   [
+     ifelse (first $element-of-A < first $element-of-B) 
+     [set $elements-of-A but-first $elements-of-A]
+     [set $elements-of-B but-first $elements-of-B]
+   ]
+  ]
+  report $degree
+end
+
+
+;; DEGREE-OF-FULFILLMENT-CONTINOUS [A B]
+  ;; A and B are continuous fuzzy sets
+to-report $degree-of-fulfillment-continuous [$A $B]
+  let $reduced-range $and-interval ([$universe] of $A) ([$universe] of $B)
+  ifelse length $reduced-range > 0 
+  [
+    let $degree 0
+    
+    let $x (first $reduced-range)
+    let $l (last $reduced-range)
+    while [ $x <= $l ] [
+      let $va [$single-evaluation-number $x] of $A
+      let $vb [$single-evaluation-number $x] of $B
+      let $minimum ifelse-value ($va < $vb) [$va][$vb]
+      if ($degree < $minimum) [set $degree $minimum] 
+      set $x ($x + (1.0 / $fuzzy-resolution))
+    ]
+    report $degree
+  ]
+  [report $undefined-degree-of-fulfilment]  
+end
+
+
+;; DEGREE-OF-FULFILLMENT-MIXED [A B]
+  ;; A and B are fuzzy sets
+  ;; It is assumed that one fuzzy set is continuous and the other one is discrete.
+to-report $degree-of-fulfillment-mixed [$A $B]
+  let $C 0 let $D 0
+  ifelse ([$continuous?] of $A) [set $C $A set $D $B][set $C $B set $D $A]
+  
+  let $elements-of-D [$membership-function-parameters] of $D
+  let $numbers-to-be-evaluated map first $elements-of-D
+  
+  let $smallest-C first [$universe] of $C
+  let $highest-C last [$universe] of $C
+  set $numbers-to-be-evaluated filter [(? >= $smallest-C) and (? <= $highest-C)] $numbers-to-be-evaluated
+  
+  ifelse length $numbers-to-be-evaluated > 0
+  [
+    let $discrete-evaluations map [[$single-evaluation-number ?] of $D] $numbers-to-be-evaluated
+    let $continuous-evaluations map [[$single-evaluation-number ?] of $C] $numbers-to-be-evaluated
+    let $minima (map [ifelse-value (?1 <= ?2) [?1][?2]] $discrete-evaluations $continuous-evaluations)
+    report max $minima
+  ]
+  [ report $undefined-degree-of-fulfilment ]
+end
+
+
+;; DEGREE-OF-FULFILLMENT-PIECEWISE-LINEAR [A B]
+  ;; A and B are piecewise linear fuzzy sets
+to-report $degree-of-fulfillment-piecewise-linear [$A $B]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements-of-B [$membership-function-parameters] of $B
+  
+  let $le $lower-envelope $elements-of-A $elements-of-B
+  report ifelse-value (length $le = 0) [$undefined-degree-of-fulfilment] [max map last $le]
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SET CREATION FUNCTIONS -FROM SCRATCH ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; fuzzy-discrete-numeric-set [list-of-points]
+  ;; list-of-points is a list [[x1,y1] [x2,y2]... [xn,yn]] 
+  ;; The membership function is a discrete function that assigns the degree of membership yi to each point xi.
+  ;; For values of x != xi the membership function is not defined.
+to-report fuzzy-discrete-numeric-set [$p]
+  $check-list-of-points $p
+  let $new-set nobody
+  let $op sort-by [first ?1 < first ?2] $p 
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $op
+    set $universe map first $op
+    set hidden? true
+    set $description "discrete"
+    set label "discrete"
+    set $new-set self
+  ]]  
+  report $new-set
+end
+
+;; fuzzy-discrete-numeric-set-with-label [name list-of-points]
+  ;; name is a string that can be used later to refer to this fuzzy set, typing "FS name".
+to-report fuzzy-discrete-numeric-set-with-label [$l $p]
+  let $new-set fuzzy-discrete-numeric-set $p
+  ask $new-set [set label $l]  
+  report $new-set
+end
+
+;; fuzzy-interval-with-points-set [[interval value] list-of-points]
+  ;; interval is a 2-number list [a,b] which represents the $universe.
+  ;; value is a number in between 0 and 1.
+  ;; list-of-points is a list [[x1,y1] [x2,y2]... [xn,yn]].
+  ;; The membership function assigns the degree of membership value 
+  ;; to every point in the interval [a,b], except for the points in list-of-points.
+  ;; The function assigns the degree of membership yi to each point xi.
+  ;; For values of x outside the interval ($universe), the membership function is not defined.
+to-report fuzzy-interval-with-points-set [$p]
+  if not is-list? $p [user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list.") report nobody]
+  
+  let $f first $p
+  if (length $f != 2) or (not is-list? first $f) or (not is-number? last $f) [
+      user-message (word "Error when trying to create Fuzzy Set.\nThe first element of parameter " $p " must look like [interval value],\n where interval is a 2-number list.") report nobody
+  ]
+  
+  let $u first $f
+  if (length $u != 2) or (not is-number? first $u) or (not is-number? last $u) [
+      user-message (word "Error when trying to create Fuzzy Set.\nThe first element of " $f " must look be a 2-number list.") report nobody
+  ]
+  if first $u >= last $u [
+    user-message (word "Error when trying to create Fuzzy Set.\nThe first element of " $f " must be an interval.") report nobody
+  ]
+  
+  let $v last $f
+  if (not is-number? $v) [
+    user-message (word "Error when trying to create Fuzzy Set.\nThe second element of " $f " must be a number.") report nobody
+  ]
+  
+  let $lp last $p
+  $check-list-of-points $lp
+  
+  let $new-set nobody
+  let $op sort-by [first ?1 < first ?2] $lp 
+  
+  if (first first $op < first $u) or (first last $op > last $u) [
+    user-message (word "Error when trying to create Fuzzy Set.\nAll the points in " $op " should be in the interval " $u ".") report nobody
+  ]
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set $membership-function (task $interval-with-points-membership-function)
+    set $continuous? true
+    set $membership-function-parameters (list (list $u $v) $op)
+    set $universe $u
+    set hidden? true
+    set $description "interval with points"
+    set label "interval with points"
+    set $new-set self
+  ]]  
+  report $new-set
+end
+
+;; fuzzy-interval-with-points-set-with-label [name list-of-points]
+  ;; name is a string that can be used later to refer to this fuzzy set, typing "FS name".
+to-report fuzzy-interval-with-points-set-with-label [$l $p]
+  let $new-set fuzzy-interval-with-points-set $p
+  ask $new-set [set label $l]  
+  report $new-set
+end
+
+;; fuzzy-piecewise-linear-set [list-of-points]
+  ;; list-of-points is a list [[x1 y1] [x2 y2]... [xn yn]] 
+  ;; The $universe is [xl,xh], where xl is the lowest xi, and xh is the highest xi.
+  ;; The membership function is a piecewise linear function that joins all the points.
+  ;; For values of x < xl the membership function is not defined.
+  ;; For values of x > xh the membership function is not defined.
+to-report fuzzy-piecewise-linear-set [$p]
+  $check-list-of-points $p
+  if length $p < 2 [user-message (word "Error when trying to create Piecewise-linear Fuzzy Set.\nAt least 2 points must be provided.") report nobody]
+  let $new-set nobody
+  let $op sort-by [first ?1 < first ?2] $p 
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $op
+    set $universe (list (first first $op) (first last $op))
+    set hidden? true
+    set $description "piecewise-linear"
+    set label "piecewise-linear"
+    set $new-set self
+  ]]  
+  report $new-set
+end
+
+;; fuzzy-piecewise-linear-set-with-label [name list-of-points]
+  ;; name is a string that can be used later to refer to this fuzzy set, typing "FS name".
+to-report fuzzy-piecewise-linear-set-with-label [$l $p]
+  let $new-set fuzzy-piecewise-linear-set $p
+  ask $new-set [set label $l]  
+  report $new-set
+end
+
+;; fuzzy-trapezoidal-set [list-of-parameters]
+  ;; list-of-parameters is a list [a, b, c, d, e, f, HEIGHT] 
+  ;; The membership function equals 0 in the interval [a,b],
+  ;; increases linearly from 0 to HEIGHT in the range b to c, 
+  ;; is equal to HEIGHT in the range c to d, 
+  ;; decreases linearly from HEIGHT to 0 in the range d to e,
+  ;; and equals 0 in the interval [e,f].
+  ;; The $universe is [a,f].
+  ;; For values of x outside the $universe, the membership function is not defined. 
+to-report fuzzy-trapezoidal-set [$p]
+  if length $p != 7 [user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list with 7 numbers.") report nobody]
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters (list (list (first $p) 0) (list (item 1 $p) 0) (list (item 2 $p) (last $p)) (list (item 3 $p) (last $p)) (list (item 4 $p) 0) (list (item 5 $p) 0))
+    set $universe (list (first $p) (item 5 $p))
+    set hidden? true
+    set $description "piecewise-linear"
+    set label "piecewise-linear"
+    set $new-set self
+  ]]  
+  report $new-set
+end
+
+;; fuzzy-trapezoidal-set-with-label [name list-of-parameters]
+  ;; name is a string that can be used later to refer to this fuzzy set, typing "FS name".
+to-report fuzzy-trapezoidal-set-with-label [$l $p]
+  let $new-set fuzzy-trapezoidal-set $p
+  ask $new-set [set label $l]  
+  report $new-set
+end
+
+;; fuzzy-logistic-set [list-of-parameters]
+  ;; list-of-parameters is a list [x0 a b [lower-limit upper-limit]] 
+  ;; The membership function is equal to (1 / (1 + a * exp (-b * (x - x0)))),
+  ;; within the range [lower-limit, upper-limit] for x.
+  ;; For values of x outside the range ($universe), the membership function is not defined.
+to-report fuzzy-logistic-set [$p]
+  if (length $p != 4) [user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list with 3 numbers and one 2-number list.") report nobody]
+  if ((length last $p) != 2) [user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list with 3 numbers and one 2-number list.") report nobody]
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set $membership-function (task $logistic-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $p
+    set $universe last $p
+    set hidden? true
+    set $description "logistic"
+    set label "logistic"
+    set $new-set self
+  ]]
+  report $new-set
+end
+
+;; fuzzy-logistic-set-with-label [name list-of-parameters]
+  ;; name is a string that can be used later to refer to this fuzzy set, typing "FS name".
+to-report fuzzy-logistic-set-with-label [$l $p]
+  let $new-set fuzzy-logistic-set $p
+  ask $new-set [set label $l]  
+  report $new-set
+end
+
+;; fuzzy-gaussian-set [list-of-parameters]
+  ;; list-of-parameters is a list [m s [lower-limit upper-limit]] 
+  ;; The membership function is equal to exp ( - ( (x - m) ^ 2) / (2 * (s ^ 2)))),
+  ;; within the range [lower-limit, upper-limit] for x.
+  ;; Note that the value of the function at x = m is always 1, so it is 
+  ;; a scaled normal distribution.
+  ;; For values of x outside the range ($universe), the membership function is not defined.
+to-report fuzzy-gaussian-set [$p]
+  if (length $p != 3) [user-message (word "Error when trying to create Gaussian Fuzzy Set.\nParameter " $p " must be a list with 2 numbers and one 2-number list.") report nobody]
+  if ((length last $p) != 2) [user-message (word "Error when trying to create Gaussian Fuzzy Set.\nParameter " $p " must be a list with 2 numbers and one 2-number list.") report nobody]
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set $membership-function (task $gaussian-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $p
+    set $universe last $p
+    set hidden? true
+    set $description "gaussian"
+    set label "gaussian"
+    set $new-set self
+  ]]
+  report $new-set
+end
+
+;; fuzzy-gaussian-set-with-label [name list-of-parameters]
+  ;; name is a string that can be used later to refer to this fuzzy set, typing "FS name".
+to-report fuzzy-gaussian-set-with-label [$l $p]
+  let $new-set fuzzy-gaussian-set $p
+  ask $new-set [set label $l]  
+  report $new-set
+end
+
+;; fuzzy-exponential-set [list-of-parameters]
+  ;; list-of-parameters is a list [a b c [lower-limit upper-limit]] 
+  ;; The membership function is equal to a * exp (b * (x - c)),
+  ;; within the range [lower-limit, upper-limit] for x,
+  ;; as long as the value is in the interval [0,1]; otherwise, 
+  ;; it is clipped.
+  ;; Note that the value of the function at x = c is always a.
+  ;; For values of x outside the range ($universe), the membership function is not defined.
+to-report fuzzy-exponential-set [$p]
+  if (length $p != 4) [user-message (word "Error when trying to create exponential Fuzzy Set.\nParameter " $p " must be a list with 3 numbers and one 2-number list.") report nobody]
+  if ((length last $p) != 2) [user-message (word "Error when trying to create exponential Fuzzy Set.\nParameter " $p " must be a list with 3 numbers and one 2-number list.") report nobody]
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set $membership-function (task $exponential-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $p
+    set $universe last $p
+    set hidden? true
+    set $description "exponential"
+    set label "exponential"
+    set $new-set self
+  ]]
+  report $new-set
+end
+
+;; fuzzy-exponential-set-with-label [name list-of-parameters]
+  ;; name is a string that can be used later to refer to this fuzzy set, typing "FS name".
+to-report fuzzy-exponential-set-with-label [$l $p]
+  let $new-set fuzzy-exponential-set $p
+  ask $new-set [set label $l]  
+  report $new-set
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SET CREATION FUNCTIONS -WITH OTHER SETS ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;; FUZZY-AND l
+  ;; l is a list of fuzzy sets
+  ;; This function creates and reports a fuzzy set whose membership function is the minimum 
+  ;; of the membership functions of all the sets in the list l.
+to-report fuzzy-and [$list-of-sets]
+  report fuzzy-min $list-of-sets
+end
+
+;; FUZZY-MIN l
+  ;; l is a list of fuzzy sets
+  ;; This function creates and reports a fuzzy set whose membership function is the minimum 
+  ;; of the membership functions of all the sets in the list l.
+to-report fuzzy-min [$list-of-sets]
+  if not is-list? $list-of-sets [user-message (word "The argument of fuzzy-min must be a list. You provided " $list-of-sets)]
+  if length $list-of-sets = 1 [
+    let $new-set nobody
+    ask (first $list-of-sets) [hatch-fuzzy-sets 1 [set $new-set self]]
+    report $new-set
+  ]
+  
+  let list-of-$continuous? map [[$continuous?] of ?] $list-of-sets
+  
+  ;; the following checks that the sets are all continuous or all not continuous:
+  let $all-continuous? reduce and list-of-$continuous?
+  let $all-discrete? reduce and (map not list-of-$continuous?)
+  if not ($all-continuous? or $all-discrete?) [
+    user-message (word "Error when trying to create Fuzzy Set \n" (word [label] of first $list-of-sets (reduce word map [(word "-MIN-" ([label] of ?))] but-first $list-of-sets) ) ".\nThey must be all discrete or all continuous.") 
+    report nobody
+  ]
+
+  ifelse $all-continuous?
+  [
+    let $all-piecewise? reduce and (map [[$description] of ? = "piecewise-linear"] $list-of-sets)
+    report ifelse-value $all-piecewise? 
+    [ $fuzzy-min-piecewise-linear $list-of-sets ]
+    [ $fuzzy-min-continuous $list-of-sets ]
+  ] 
+  [ report $fuzzy-min-discrete $list-of-sets ]
+
+end
+
+;; FUZZY-OR l
+  ;; l is a list of fuzzy sets
+  ;; This function creates and reports a fuzzy set whose membership function is the maximum 
+  ;; of the membership functions of all the sets in the list l 
+to-report fuzzy-or [$list-of-sets]
+  report fuzzy-max $list-of-sets
+end
+
+;; FUZZY-MAX l
+  ;; l is a list of fuzzy sets
+  ;; This function creates and reports a fuzzy set whose membership function is the maximum 
+  ;; of the membership functions of all the sets in the list l 
+to-report fuzzy-max [$list-of-sets]
+  if not is-list? $list-of-sets [user-message (word "The argument of fuzzy-max must be a list. You provided " $list-of-sets)]
+  if length $list-of-sets = 1 [
+    let $new-set nobody
+    ask (first $list-of-sets) [hatch-fuzzy-sets 1 [set $new-set self]]
+    report $new-set
+  ]
+  
+  let list-of-$continuous? map [[$continuous?] of ?] $list-of-sets
+  
+  ;; the following checks that the sets are all continuous or all not continuous:
+  let $all-continuous? reduce and list-of-$continuous?
+  let $all-discrete? reduce and (map not list-of-$continuous?)
+  if not ($all-continuous? or $all-discrete?) [
+    user-message (word "Error when trying to create Fuzzy Set \n" (word [label] of first $list-of-sets (reduce word map [(word "-MAX-" ([label] of ?))] but-first $list-of-sets) ) ".\nThey must be all discrete or all continuous.") 
+    report nobody
+  ]
+
+  ifelse $all-continuous?
+  [
+    let $all-piecewise? reduce and (map [[$description] of ? = "piecewise-linear"] $list-of-sets)
+    report ifelse-value $all-piecewise? 
+    [ $fuzzy-max-piecewise-linear $list-of-sets ]
+    [ $fuzzy-max-continuous $list-of-sets ]
+  ] 
+  [ report $fuzzy-max-discrete $list-of-sets ]
+
+end
+
+
+;; FUZZY-SUM l
+  ;; l is a list of fuzzy sets
+  ;; This function creates and reports a fuzzy set whose membership function is the clipped sum 
+  ;; of the membership functions of all the sets in the list l 
+to-report fuzzy-sum [$list-of-sets]
+  if not is-list? $list-of-sets [user-message (word "The argument of fuzzy-sum must be a list. You provided " $list-of-sets)]
+  if length $list-of-sets = 1 [
+    let $new-set nobody
+    ask (first $list-of-sets) [hatch-fuzzy-sets 1 [set $new-set self]]
+    report $new-set
+  ]
+  let list-of-$continuous? map [[$continuous?] of ?] $list-of-sets
+  
+  ;; the following checks that the sets are all continuous or all not continuous:
+  let $all-continuous? reduce and list-of-$continuous?
+  let $all-discrete? reduce and (map not list-of-$continuous?)
+  if not ($all-continuous? or $all-discrete?) [
+    user-message (word "Error when trying to create Fuzzy Set \n" (word [label] of first $list-of-sets (reduce word map [(word "+" ([label] of ?))] but-first $list-of-sets) ) ".\nThey must be all discrete or all continuous.") 
+    report nobody
+  ]
+
+  ifelse $all-continuous?
+  [
+    let $all-piecewise? reduce and (map [[$description] of ? = "piecewise-linear"] $list-of-sets)
+    report ifelse-value $all-piecewise? 
+    [ $fuzzy-sum-piecewise-linear $list-of-sets ]
+    [ $fuzzy-sum-continuous $list-of-sets ]
+  ] 
+  [ report $fuzzy-sum-discrete $list-of-sets ]
+
+end
+
+;; FUZZY-PROB-OR l
+  ;; l is a list of fuzzy sets
+  ;; This function creates and reports a fuzzy set whose membership function is the probabilistic OR 
+  ;; of the membership functions of all the sets in the list l 
+to-report fuzzy-prob-or [$list-of-sets]
+  if not is-list? $list-of-sets [user-message (word "The argument of fuzzy-prob-or must be a list. You provided " $list-of-sets)]
+  if length $list-of-sets = 1 [
+    let $new-set nobody
+    ask (first $list-of-sets) [hatch-fuzzy-sets 1 [set $new-set self]]
+    report $new-set
+  ]
+  let list-of-$continuous? map [[$continuous?] of ?] $list-of-sets
+  
+  ;; the following checks that the sets are all continuous or all not continuous:
+  let $all-continuous? reduce and list-of-$continuous?
+  let $all-discrete? reduce and (map not list-of-$continuous?)
+  if not ($all-continuous? or $all-discrete?) [
+    user-message (word "Error when trying to create Fuzzy Set \n" (word [label] of first $list-of-sets (reduce word map [(word "-PROB-OR-" ([label] of ?))] but-first $list-of-sets) ) ".\nThey must be all discrete or all continuous.") 
+    report nobody
+  ]
+
+  report ifelse-value $all-continuous?
+  [ $fuzzy-prob-or-continuous $list-of-sets ] 
+  [ $fuzzy-prob-or-discrete $list-of-sets ]
+
+end
+
+;; FUZZY-NOT [A]
+  ;; A is a fuzzy set
+  ;; This function creates and reports a fuzzy set whose membership function is 
+  ;; (1 - the membership function of A)
+to-report fuzzy-not [$A]
+  ifelse ([$continuous?] of $A) 
+  [
+    ifelse ([$description] of $A = "piecewise-linear") 
+    [report $fuzzy-not-piecewise-linear $A]
+    [report $fuzzy-not-continuous $A]
+  ]
+  [
+    report $fuzzy-not-discrete $A
+  ]
+end
+
+;; FUZZY-TRUNCATE [A c]
+  ;; A is a fuzzy set, and c is a number in between 0 and 1
+  ;; This function creates and reports a fuzzy set whose membership function is 
+  ;; the same as A's, but limited by the upper bound c
+to-report fuzzy-truncate [$A $c]
+  if $c < 0 or $c > 1 [
+    user-message (word "Error when trying to create Fuzzy Set (TRUNCATED-" ([label] of $A) ").\nThe upper bound must be in the interval [0,1].")
+    report nobody
+  ] 
+  
+  ifelse ([$continuous?] of $A) 
+  [
+    ifelse ([$description] of $A = "piecewise-linear") 
+    [report $fuzzy-truncate-piecewise-linear $A $c]
+    [report $fuzzy-truncate-continuous $A $c]
+  ]
+  [
+    report $fuzzy-truncate-discrete $A $c
+  ]
+end  
+
+;; FUZZY-PROD [A f]
+  ;; A is a fuzzy set, and f is a number in between 0 and 1
+  ;; This function creates and reports a fuzzy set whose membership function is 
+  ;; A's membership function multiplied by number f
+to-report fuzzy-prod [$A $f]
+  if $f < 0 or $f > 1 [
+    user-message (word "Error when trying to create Fuzzy Set " ([label] of $A) "*" $f ").\nThe factor must be in the interval [0,1].")
+    report nobody
+  ] 
+  
+  ifelse ([$continuous?] of $A) 
+  [
+    ifelse ([$description] of $A = "piecewise-linear") 
+    [report $fuzzy-prod-piecewise-linear $A $f]
+    [report $fuzzy-prod-continuous $A $f]
+  ]
+  [
+    report $fuzzy-prod-discrete $A $f
+  ]
+end  
+
+;; FUZZY-POWER [A ex]
+  ;; A is a fuzzy set, and ex is a non-negative number. 
+  ;; This function creates and reports a fuzzy set whose membership function is 
+  ;; (the membership function of A) raised to the power of ex. 
+to-report fuzzy-power [$A $ex]
+  if $ex < 0 [
+    user-message (word "Error when trying to create Fuzzy Set " ([label] of $A) "^" $ex ").\nThe exponent must be positive.")
+    report nobody
+  ] 
+  
+  report ifelse-value ([$continuous?] of $A) 
+  [ $fuzzy-power-continuous $A $ex ]
+  [ $fuzzy-power-discrete $A $ex ]
+end
+
+
+  
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  
+  
+
+;; FUZZY-MIN-CONTINUOUS l
+  ;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the minimum 
+  ;; of the membership functions of the fuzzy sets in the list, 
+  ;; whereever all functions are defined. 
+to-report $fuzzy-min-continuous [$list-of-sets]
+  let $replicated-fuzzy-sets []
+  foreach $list-of-sets [
+    ask ? [hatch-fuzzy-sets 1 [
+      set $replicated-fuzzy-sets lput self $replicated-fuzzy-sets
+    ]]
+  ]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $replicated-fuzzy-sets (reduce word map [(word "-MIN-" ([label] of ?))] but-first $replicated-fuzzy-sets))
+    set $membership-function (task $and-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $replicated-fuzzy-sets
+    set $universe reduce $and-interval map [[$universe] of ?] $replicated-fuzzy-sets
+        ;; we impose that all membership functions must be defined.
+    set hidden? true
+    set $description "min"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-sets
+  ]]
+  report $new-set
+end
+
+
+;; FUZZY-MAX-CONTINUOUS l
+  ;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the maximum 
+  ;; of the membership functions of the fuzzy sets in the list, 
+  ;; wherever all functions are defined. 
+to-report $fuzzy-max-continuous [$list-of-sets]
+  let $replicated-fuzzy-sets []
+  foreach $list-of-sets [
+    ask ? [hatch-fuzzy-sets 1 [
+      set $replicated-fuzzy-sets lput self $replicated-fuzzy-sets
+    ]]
+  ]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $replicated-fuzzy-sets (reduce word map [(word "-MAX-" ([label] of ?))] but-first $replicated-fuzzy-sets))
+    set $membership-function (task $or-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $replicated-fuzzy-sets
+    set $universe reduce $and-interval map [[$universe] of ?] $replicated-fuzzy-sets
+        ;; we impose that all membership functions must be defined.
+    set hidden? true
+    set $description "max"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-sets
+  ]]  
+  report $new-set
+end
+
+;; FUZZY-SUM-CONTINUOUS l
+  ;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the sum 
+  ;; of the membership functions of the fuzzy sets in the list, 
+  ;; wherever all functions are defined. 
+to-report $fuzzy-sum-continuous [$list-of-sets]
+  let $replicated-fuzzy-sets []
+  foreach $list-of-sets [
+    ask ? [hatch-fuzzy-sets 1 [
+      set $replicated-fuzzy-sets lput self $replicated-fuzzy-sets
+    ]]
+  ]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $replicated-fuzzy-sets (reduce word map [(word "+" ([label] of ?))] but-first $replicated-fuzzy-sets))
+    set $membership-function (task $sum-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $replicated-fuzzy-sets
+    set $universe reduce $and-interval map [[$universe] of ?] $replicated-fuzzy-sets
+        ;; we impose that all membership functions must be defined.
+    set hidden? true
+    set $description "sum"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-sets
+  ]]  
+  report $new-set
+end
+
+;; FUZZY-PROB-OR-CONTINUOUS l
+  ;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the probabilistic or 
+  ;; of the membership functions of the fuzzy sets in the list, 
+  ;; wherever all functions are defined. 
+to-report $fuzzy-prob-or-continuous [$list-of-sets]
+  let $replicated-fuzzy-sets []
+  foreach $list-of-sets [
+    ask ? [hatch-fuzzy-sets 1 [
+      set $replicated-fuzzy-sets lput self $replicated-fuzzy-sets
+    ]]
+  ]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $replicated-fuzzy-sets (reduce word map [(word "-PROB-OR-" ([label] of ?))] but-first $replicated-fuzzy-sets))
+    set $membership-function (task $prob-or-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $replicated-fuzzy-sets
+    set $universe reduce $and-interval map [[$universe] of ?] $replicated-fuzzy-sets
+        ;; we impose that all membership functions must be defined.
+    set hidden? true
+    set $description "prob-or"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-sets
+  ]]  
+  report $new-set
+end
+
+
+;; FUZZY-NOT-CONTINUOUS [A]
+  ;; A is a fuzzy set
+  ;; This function reports a fuzzy set whose membership function is 
+  ;; (1 - the membership function of A)
+to-report $fuzzy-not-continuous [$A]
+  let $replicated-fuzzy-set []
+  ask $A [hatch-fuzzy-sets 1 [ set $replicated-fuzzy-set (list self) ]]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(NOT-"([label] of $A)")")
+    set $membership-function (task $not-membership-function)
+    set $continuous? true
+    set $membership-function-parameters (list $A)
+    set $universe ([$universe] of $A)
+    set hidden? true
+    set $description "not"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-set
+  ]] 
+  report $new-set
+end
+
+;; FUZZY-TRUNCATE-CONTINUOUS [A c]
+  ;; A is a fuzzy set, and c is a number in between 0 and 1
+  ;; This function reports a fuzzy set whose membership function is 
+  ;; the same as A's, but limited by the upper bound c
+to-report $fuzzy-truncate-continuous [$A $c]
+  let $replicated-fuzzy-set []
+  ask $A [hatch-fuzzy-sets 1 [ set $replicated-fuzzy-set (list self) ]]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(TRUNCATED-"([label] of $A) ")")
+    set $membership-function (task $truncate-membership-function)
+    set $continuous? true
+    set $membership-function-parameters (list (first $replicated-fuzzy-set) $c)
+    set $universe ([$universe] of $A)
+    set hidden? true
+    set $description "truncated"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-set
+  ]]
+  report $new-set  
+end  
+
+;; FUZZY-POWER-CONTINUOUS [A c]
+to-report $fuzzy-power-continuous [$A $ex]
+  let $replicated-fuzzy-set []
+  ask $A [hatch-fuzzy-sets 1 [ set $replicated-fuzzy-set (list self) ]]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(" ([label] of $A) "^" $ex ")")
+    set $membership-function (task $power-membership-function)
+    set $continuous? true
+    set $membership-function-parameters (list (first $replicated-fuzzy-set) $ex)
+    set $universe ([$universe] of $A)
+    set hidden? true
+    set $description "power"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-set
+  ]] 
+  report $new-set
+  
+end  
+
+;; FUZZY-PROD-CONTINUOUS [A f]
+to-report $fuzzy-prod-continuous [$A $f]
+  let $replicated-fuzzy-set []
+  ask $A [hatch-fuzzy-sets 1 [ set $replicated-fuzzy-set (list self) ]]
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(" ([label] of $A) "*" $f ")")
+    set $membership-function (task $product-membership-function)
+    set $continuous? true
+    set $membership-function-parameters (list (first $replicated-fuzzy-set) $f)
+    set $universe ([$universe] of $A)
+    set hidden? true
+    set $description "power"
+    set $new-set self
+    set $dependent-temporary-sets $replicated-fuzzy-set
+  ]] 
+  report $new-set
+  
+end  
+
+
+;; FUZZY-MIN-DISCRETE l
+;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the minimum 
+  ;; of the membership functions of the fuzzy sets in the list, 
+  ;; wherever all functions are defined. 
+to-report $fuzzy-min-discrete [$list-of-sets]
+  let $list-of-elements map [[$membership-function-parameters] of ?] $list-of-sets 
+  ;; TO DO:
+  ;; This could be done much more efficiently doing all sets
+  ;; with one pass. I'll do it when I find the time.
+  let $elements reduce [$discrete-min ?1 ?2] $list-of-elements
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $list-of-sets (reduce word map [(word "-MIN-" ([label] of ?))] but-first $list-of-sets))
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]] 
+  report $new-set
+end
+
+;; $discrete-min
+to-report $discrete-min [$elements-of-A $elements-of-B]
+  let $elements []
+  
+  while [(length $elements-of-A > 0) and (length $elements-of-B > 0)] [
+   let $element-of-A first $elements-of-A
+   let $element-of-B first $elements-of-B
+   ifelse (first $element-of-A = first $element-of-B) 
+   [
+     let $va last $element-of-A
+     let $vb last $element-of-B
+     set $elements lput (ifelse-value ($va < $vb) [$element-of-A][$element-of-B]) $elements
+     set $elements-of-A but-first $elements-of-A
+     set $elements-of-B but-first $elements-of-B
+   ]
+   [
+     ifelse (first $element-of-A < first $element-of-B) 
+     [set $elements-of-A but-first $elements-of-A]
+     [set $elements-of-B but-first $elements-of-B]
+   ]
+  ]
+  report $elements
+end
+
+;; FUZZY-MAX-DISCRETE l
+;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the maximum 
+   ;; of the membership functions of the fuzzy sets in the list, 
+  ;; wherever all functions are defined. 
+to-report $fuzzy-max-discrete [$list-of-sets]
+  let $list-of-elements map [[$membership-function-parameters] of ?] $list-of-sets 
+  ;; TO DO:
+  ;; This could be done much more efficiently doing all sets
+  ;; with one pass. I'll do it when I find the time.
+  let $elements reduce [$discrete-max ?1 ?2] $list-of-elements
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $list-of-sets (reduce word map [(word "-MAX-" ([label] of ?))] but-first $list-of-sets))
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]]  
+  report $new-set
+end 
+ 
+;; $discrete-max
+to-report $discrete-max [$elements-of-A $elements-of-B]
+  let $elements []
+  
+  while [(length $elements-of-A > 0) and (length $elements-of-B > 0)] [
+   let $element-of-A first $elements-of-A
+   let $element-of-B first $elements-of-B
+   ifelse (first $element-of-A = first $element-of-B) 
+   [
+     let $va last $element-of-A
+     let $vb last $element-of-B
+     set $elements lput (ifelse-value ($va > $vb) [$element-of-A][$element-of-B]) $elements
+     set $elements-of-A but-first $elements-of-A
+     set $elements-of-B but-first $elements-of-B
+   ]
+   [
+     ifelse (first $element-of-A < first $element-of-B) 
+     [set $elements-of-A but-first $elements-of-A]
+     [set $elements-of-B but-first $elements-of-B]
+   ]
+  ]
+  report $elements
+end
+
+;; FUZZY-SUM-DISCRETE l
+;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the clipped sum 
+  ;; of the membership functions of the fuzzy sets in the list, 
+  ;; wherever all functions are defined. 
+to-report $fuzzy-sum-discrete [$list-of-sets]
+  let $list-of-elements map [[$membership-function-parameters] of ?] $list-of-sets 
+  ;; TO DO:
+  ;; This could be done much more efficiently doing all sets
+  ;; with one pass. I'll do it when I find the time.
+  let $elements reduce [$discrete-sum ?1 ?2] $list-of-elements
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $list-of-sets (reduce word map [(word "+" ([label] of ?))] but-first $list-of-sets))
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]]  
+  report $new-set
+end 
+ 
+;; $discrete-sum
+to-report $discrete-sum [$elements-of-A $elements-of-B]
+  let $elements []
+  
+  while [(length $elements-of-A > 0) and (length $elements-of-B > 0)] [
+   let $element-of-A first $elements-of-A
+   let $element-of-B first $elements-of-B
+   ifelse (first $element-of-A = first $element-of-B) 
+   [
+     set $elements lput (list (first $element-of-A) $clip-no-greater-than-1 (last $element-of-A + last $element-of-B)) $elements
+     set $elements-of-A but-first $elements-of-A
+     set $elements-of-B but-first $elements-of-B
+   ]
+   [
+     ifelse (first $element-of-A < first $element-of-B) 
+     [set $elements-of-A but-first $elements-of-A]
+     [set $elements-of-B but-first $elements-of-B]
+   ]
+  ]
+  report $elements
+end
+
+;; FUZZY-PROB-OR-DISCRETE l
+;; l is a list of fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the probabilistic OR
+  ;; of the membership functions of the fuzzy sets in the list, 
+  ;; wherever all functions are defined. 
+to-report $fuzzy-prob-or-discrete [$list-of-sets]
+  let $list-of-elements map [[$membership-function-parameters] of ?] $list-of-sets 
+  ;; TO DO:
+  ;; This could be done much more efficiently doing all sets
+  ;; with one pass. I'll do it when I find the time.
+  let $elements reduce [$discrete-prob-or ?1 ?2] $list-of-elements
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $list-of-sets (reduce word map [(word "-PROB-OR-" ([label] of ?))] but-first $list-of-sets))
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]]  
+  report $new-set
+end 
+
+;; $discrete-prob-or
+to-report $discrete-prob-or [$elements-of-A $elements-of-B]
+  let $elements []
+  
+  while [(length $elements-of-A > 0) and (length $elements-of-B > 0)] [
+   let $element-of-A first $elements-of-A
+   let $element-of-B first $elements-of-B
+   ifelse (first $element-of-A = first $element-of-B) 
+   [
+     let $va last $element-of-A
+     let $vb last $element-of-B
+     set $elements lput (list (first $element-of-A) ($va + $vb - $va * $vb)) $elements
+     set $elements-of-A but-first $elements-of-A
+     set $elements-of-B but-first $elements-of-B
+   ]
+   [
+     ifelse (first $element-of-A < first $element-of-B) 
+     [set $elements-of-A but-first $elements-of-A]
+     [set $elements-of-B but-first $elements-of-B]
+   ]
+  ]
+  report $elements
+end
+
+;; FUZZY-NOT-DISCRETE [A]
+  ;; A is a fuzzy set
+  ;; This function reports a fuzzy set whose membership function is 
+  ;; (1 - the membership function of A)
+to-report $fuzzy-not-discrete [$A]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements map [(list (first ?) (1 - last ?))] $elements-of-A
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(NOT-"([label] of $A)")")
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]] 
+  report $new-set
+end   
+
+;; FUZZY-TRUNCATE-DISCRETE [A c]
+  ;; A is a fuzzy set, and c is a number in between 0 and 1.
+  ;; This function reports a fuzzy set whose membership function is 
+  ;; the same as A's, but limited by the upper bound c
+to-report $fuzzy-truncate-discrete [$A $c]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements map [(list (first ?) ifelse-value (last ? < $c) [last ?][$c])] $elements-of-A
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(TRUNCATED-"([label] of $A)")")
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]] 
+  report $new-set
+end  
+
+
+;; FUZZY-POWER-DISCRETE [A ex]
+to-report $fuzzy-power-discrete [$A $ex]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements map [(list (first ?) (last ? ^ $ex))] $elements-of-A
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(" ([label] of $A) "^" $ex ")")
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]] 
+  report $new-set
+  
+end  
+
+;; FUZZY-PROD-DISCRETE [A f]
+  ;; A is a fuzzy set, and f is a number in between 0 and 1
+  ;; This function creates and reports a fuzzy set whose membership function is 
+  ;; A's membership function multiplied by number f
+to-report $fuzzy-prod-discrete [$A $f]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements map [(list (first ?) (last ? * $f))] $elements-of-A
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(" ([label] of $A) "*" $f ")")
+    set $membership-function (task $discrete-membership-function)
+    set $continuous? false
+    set $membership-function-parameters $elements
+    set $universe map first $elements
+    set hidden? true
+    set $description "discrete"
+    set $new-set self
+  ]] 
+  report $new-set
+  
+end  
+
+
+;; FUZZY-MAX-PIECEWISE-LINEAR l
+;; l is a list of piecewise-linear fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the maximum 
+  ;; of the membership functions of the sets in l 
+to-report $fuzzy-max-piecewise-linear  [$list-of-sets]
+  let $list-of-elements map [[$membership-function-parameters] of ?] $list-of-sets 
+  
+  ;; TO DO:
+  ;; This could be done much more efficiently partitioning the list in pairs and
+  ;; implementing a divide-and-conquer approach. 
+  ;; I'll do it when I find the time.
+  let $ue reduce [$upper-envelope ?1 ?2] $list-of-elements
+  
+  let $new-set nobody
+  
+  ifelse length $ue = 0 
+  [ ;; report an empty set
+    set $new-set fuzzy-empty-set
+  ]
+  
+  [
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $list-of-sets (reduce word map [(word "-MAX-" ([label] of ?))] but-first $list-of-sets))
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $ue
+    set $universe (list (first first $membership-function-parameters) (first last $membership-function-parameters))
+    set hidden? true
+    set $description "piecewise-linear"
+    set $new-set self
+  ]] 
+  ]
+
+  report $new-set
+end
+
+;; FUZZY-MIN-PIECEWISE-LINEAR l
+  ;; l is a list of piecewise-linear fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the minimum 
+  ;; of the membership functions of the sets in l 
+to-report $fuzzy-min-piecewise-linear  [$list-of-sets]
+  let $list-of-elements map [[$membership-function-parameters] of ?] $list-of-sets 
+  
+  ;; TO DO:
+  ;; This could be done much more efficiently partitioning the list in pairs and
+  ;; implementing a divide-and-conquer approach. 
+  ;; I'll do it when I find the time.
+  let $le reduce [$lower-envelope ?1 ?2] $list-of-elements
+  
+  let $new-set nobody
+  
+  ifelse length $le = 0 
+  [ ;; report an empty set
+    set $new-set fuzzy-empty-set
+  ]
+  
+  [
+    ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $list-of-sets (reduce word map [(word "-MIN-" ([label] of ?))] but-first $list-of-sets))
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $le
+    set $universe (list (first first $membership-function-parameters) (first last $membership-function-parameters))
+    set hidden? true
+    set $description "piecewise-linear"
+    set $new-set self
+    ]]  
+  ]
+  
+  report $new-set
+end
+
+
+;; FUZZY-SUM-PIECEWISE-LINEAR l
+  ;; l is a list of piecewise-linear fuzzy sets
+  ;; This function reports a fuzzy set whose membership function is the clipped sum 
+  ;; of the membership functions of the sets in l 
+to-report $fuzzy-sum-piecewise-linear  [$list-of-sets]
+  let $list-of-elements map [[$membership-function-parameters] of ?] $list-of-sets 
+  
+  ;; TO DO:
+  ;; This could be done much more efficiently summing all lines at once. 
+  ;; I'll do it when I find the time.
+  let $le reduce [$sum-of-lines ?1 ?2] $list-of-elements
+  
+  let $new-set nobody
+  
+  ifelse length $le = 0 
+  [ ;; report an empty set
+    set $new-set fuzzy-empty-set
+  ]
+  
+  [
+    let $elements-of-cut (map [(list ? 1)] (list (first first $le) (first last $le)))  
+    set $le $lower-envelope $le $elements-of-cut
+  
+    ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word [label] of first $list-of-sets (reduce word map [(word "+" ([label] of ?))] but-first $list-of-sets))
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $le
+    set $universe (list (first first $membership-function-parameters) (first last $membership-function-parameters))
+    set hidden? true
+    set $description "piecewise-linear"
+    set $new-set self
+    ]]  
+  ]
+  
+  report $new-set
+end
+
+to-report $sum-of-lines [$line-one $line-two]
+  let $l $homogenise-functions $line-one $line-two
+  if length $l < 2 [report $l]
+  
+  let $la first $l
+  let $lb last $l
+  
+  let $la-sum map [list (first ?) (last ? + $piecewise-linear-membership-function $lb first ?)] $la
+  let $lb-sum map [list (first ?) (last ? + $piecewise-linear-membership-function $la first ?)] $lb
+
+  report sort-by [first ?1 < first ?2] remove-duplicates sentence $la-sum $lb-sum
+end
+
+;; FUZZY-NOT-PIECEWISE-LINEAR [A]
+  ;; A is a piecewise-linear fuzzy set
+  ;; This function reports a fuzzy set whose membership function is 
+  ;; (1 - the membership function of A)
+to-report $fuzzy-not-piecewise-linear  [$A]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements map [(list (first ?) (1 - last ?))] $elements-of-A
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(NOT-"([label] of $A)")")
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $elements
+    set $universe (list (first first $membership-function-parameters) (first last $membership-function-parameters))
+    set hidden? true
+    set $description "piecewise-linear"
+    set $new-set self
+  ]]  
+  report $new-set
+end 
+  
+;; FUZZY-TRUNCATE-PIECEWISE-LINEAR [A c]
+  ;; A is a piecewise-linear fuzzy set, and c is a number in between 0 and 1.
+  ;; This function reports a fuzzy set whose membership function is 
+  ;; the same as A's, but limited by the upper bound c
+to-report $fuzzy-truncate-piecewise-linear  [$A $c]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements-of-cut (map [(list ? $c)] [$universe] of $A)  
+  let $le $lower-envelope $elements-of-A $elements-of-cut
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(TRUNCATED-"([label] of $A)")")
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $le
+    set $universe [$universe] of $A
+    set hidden? true
+    set $description "piecewise-linear"   
+    set $new-set self
+  ]]  
+  
+  report $new-set
+end 
+  
+;; FUZZY-PROD-PIECEWISE-LINEAR [A f]
+  ;; A is a piecewise-linear fuzzy set, and f is a number in between 0 and 1.
+  ;; This function reports a fuzzy set whose membership function is 
+  ;; A's membership function multiplied by number f
+to-report $fuzzy-prod-piecewise-linear  [$A $f]
+  let $elements-of-A [$membership-function-parameters] of $A
+  let $elements map [(list (first ?) (last ? * $f))] $elements-of-A
+  
+  let $new-set nobody
+  ask $fuzzy-creator [ hatch-fuzzy-sets 1 [
+    set label (word "(" ([label] of $A) "*" $f ")")
+    set $membership-function (task $piecewise-linear-membership-function)
+    set $continuous? true
+    set $membership-function-parameters $elements
+    set $universe [$universe] of $A
+    set hidden? true
+    set $description "piecewise-linear"   
+    set $new-set self
+  ]]  
+  
+  report $new-set
+end 
+  
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; MEMBERSHIP FUNCTIONS ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;; CREATOR
+to-report $creator-membership-function
+  report "creator"
+end
+
+;; DISCRETE
+to-report $discrete-membership-function [$p $x]
+  foreach $p [if $x = (first ?) [report last ?]]
+  report $undefined-degree-of-membership 
+end
+
+;; INTERVAL-WITH-POINTS [p x]
+  ;; p looks like: [[interval value] list-of-points]
+  ;; interval is a 2-number list [a,b] which represents the $universe.
+  ;; value is a number in between 0 and 1.
+  ;; list-of-points is an oredered list [[x1,y1] [x2,y2]... [xn,yn]]. 
+  ;; The membership function assigns the degree of membership value 
+  ;; to every point in the interval [a,b], except for the points in list-of-points.
+  ;; The function assigns the degree of membership yi to each point xi.
+  ;; For values of x outside the interval ($universe), the membership function is not defined.
+to-report $interval-with-points-membership-function [$p $x]
+  let $f first $p
+  let $u first $f
+  
+  if ($x < (first $u) or $x > (last $u)) [report $undefined-degree-of-membership]
+  
+  let $lp last $p  
+  foreach $lp [if $x = (first ?) [report last ?]]
+
+  report last $f 
+end
+  
+;; PIECEWISE LINEAR [p x]
+  ;; p is an ordered list [[x1,y1] [x2,y2]... [xn,yn]] 
+  ;; It is assume that x1 < x2 < ... < xn.
+  ;; The function is a piecewise linear function that joins all the points.
+  ;; For values of x < x1 the membership function is 0.
+  ;; For values of x > xn the membership function is 0.
+  ;; In discontinuities, the latter y is given.
+to-report $piecewise-linear-membership-function [$p $x]
+  if ($x < (first first $p) or $x > (first last $p)) [report $undefined-degree-of-membership]
+  
+  ;; find the two relevant points
+  let $i 0
+  foreach $p [if $x >= (first ?) [set $i ($i + 1)]] 
+    ;; i stores the number of points that are less than or equal to x
+  let $a (item ($i - 1) $p)
+  
+  ifelse (length $p) > $i 
+    [
+      ;; we are evaluating a point that is not the very last one.
+      let $b (item $i $p)
+      report (last $a) + ($x - first $a) * (last $b - last $a) / (first $b - first $a)    
+    ]
+    [ report (last $a) ] ;; we are evaluating the very last point
+end
+
+;; LOGISTIC [p x]
+  ;; p is a list [x0 a b [lower-limit upper-limit]] 
+  ;; The membership function is equal to (1 / (1 + a * exp (-b * (x - x0)))),
+  ;; within the range [lower-limit, upper-limit] for x
+to-report $logistic-membership-function [$p $x]
+  if ($x < (first last $p) or $x > (last last $p)) [report $undefined-degree-of-membership]
+  report (1 / (1 + (item 1 $p) * exp (- (item 2 $p) * ($x - (first $p)))))
+end
+
+;; GAUSSIAN [p x]
+  ;; p is a list [m s [lower-limit upper-limit]] 
+  ;; The membership function is equal to exp (- ( (x - m) ^ 2) / (2 * (s ^ 2))),
+  ;; within the range [lower-limit, upper-limit] for x.
+  ;; Note that the value of the function at x = m is always 1, so it is 
+  ;; a scaled normal distribution.
+to-report $gaussian-membership-function [$p $x]
+  if ($x < (first last $p) or $x > (last last $p)) [report $undefined-degree-of-membership]
+  let $m (first $p)
+  let $s (item 1 $p)
+  report ifelse-value ($s = 0) [$m] [exp ( - (($x - $m) ^ 2) / (2 * ($s ^ 2)))]
+end
+
+;; EXPONENTIAL [p x]
+  ;; p is a list [a b c [lower-limit upper-limit]] 
+  ;; The membership function is equal to a * exp (b * (x - c)),
+  ;; within the range [lower-limit, upper-limit] for x,
+  ;; as long as the value is in the interval [0,1]; otherwise, 
+  ;; it is clipped.
+  ;; Note that the value of the function at x = c is always a.
+  ;; For values of x outside the range ($universe), the membership function is not defined.
+to-report $exponential-membership-function [$p $x]
+  if ($x < (first last $p) or $x > (last last $p)) [report $undefined-degree-of-membership]
+  let $v  (first $p) * exp ( (item 1 $p) * ($x - (item 2 $p)) )
+  if $v < 0 [set $v 0]
+  if $v > 1 [set $v 1]
+  report $v
+end
+
+;; and-membership-function
+  ;; p is a list of sets
+to-report $and-membership-function [$p $x]
+  let $values map [[$single-evaluation-number $x] of ?] $p
+  let $filtered-values filter [? != $undefined-degree-of-membership] $values
+  report ifelse-value (length $filtered-values = length $p)
+    [min $filtered-values]
+    [$undefined-degree-of-membership]      
+end
+
+;; or-membership-function
+  ;; p is a list of sets
+to-report $or-membership-function [$p $x]
+  let $values map [[$single-evaluation-number $x] of ?] $p
+  let $filtered-values filter [? != $undefined-degree-of-membership] $values
+  report ifelse-value (length $filtered-values = length $p)
+    [max $filtered-values]
+    [$undefined-degree-of-membership]      
+end
+
+;; $sum-membership-function
+  ;; p is a list of sets
+to-report $sum-membership-function [$p $x]
+  let $values map [[$single-evaluation-number $x] of ?] $p
+  let $filtered-values filter [? != $undefined-degree-of-membership] $values
+  report ifelse-value (length $filtered-values = length $p)
+    [$clip-no-greater-than-1 sum $filtered-values]
+    [$undefined-degree-of-membership]      
+end
+
+;; $prob-or-membership-function
+  ;; p is a list of sets
+to-report $prob-or-membership-function [$p $x]
+  let $values map [[$single-evaluation-number $x] of ?] $p
+  let $filtered-values filter [? != $undefined-degree-of-membership] $values
+  report ifelse-value (length $filtered-values = length $p)
+    [reduce [?1 + ?2 * (1 - ?1)] $filtered-values] ;; the brackets are included for (floating-point) precision purposes.
+    [$undefined-degree-of-membership]      
+end
+
+;; not-membership-function
+to-report $not-membership-function [$p $x] 
+  let $va ([$single-evaluation-number $x] of (first $p))
+  report ifelse-value ($va = $undefined-degree-of-membership) 
+    [$undefined-degree-of-membership] 
+    [1 - $va]  
+end
+
+;; truncate-membership-function
+to-report $truncate-membership-function [$p $x]
+  let $va [$single-evaluation-number $x] of (first $p)
+  report ifelse-value ($va = $undefined-degree-of-membership) 
+    [$undefined-degree-of-membership] 
+    [ifelse-value ($va < last $p) [$va] [last $p]]
+end
+  
+;; power-membership-function
+to-report $power-membership-function [$p $x]
+  let $va [$single-evaluation-number $x] of (first $p)
+  report ifelse-value ($va = $undefined-degree-of-membership) 
+    [$undefined-degree-of-membership] 
+    [$va ^ (last $p)]
+end
+
+;; product-membership-function
+to-report $product-membership-function [$p $x]
+  let $va [$single-evaluation-number $x] of (first $p)
+  report ifelse-value ($va = $undefined-degree-of-membership) 
+    [$undefined-degree-of-membership] 
+    [$va * (last $p)]
+end
+
+;;;;;;;;;;;
+;; RULES ;;
+;;;;;;;;;;;
+
+;; fuzzy-rule [list-of-2-items consequent-fuzzy-set]
+ ;; The first parameter is a list of 2 items.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates the value in the fuzzy set, 
+ ;; and returns the consequent fuzzy set truncated by the calculated evaluation. 
+to-report fuzzy-rule [$l $conseq]
+  report fuzzy-truncate-rule $l $conseq
+end
+
+;; fuzzy-truncate-rule [list-of-2-items consequent-fuzzy-set]
+ ;; The first parameter is a list of 2 items.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates the value in the fuzzy set, 
+ ;; and returns the consequent fuzzy set truncated by the calculated evaluation. 
+to-report fuzzy-truncate-rule [$l $conseq]
+  let $evaluation [$single-evaluation first $l] of last $l 
+  report ifelse-value ($evaluation = $undefined-degree-of-membership) [fuzzy-empty-set] [fuzzy-truncate $conseq $evaluation]
+end
+
+;; fuzzy-prod-rule [list-of-2-items consequent-fuzzy-set]
+ ;; The first parameter is a list of 2 items.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates the value in the fuzzy set, 
+ ;; and returns the consequent fuzzy set multiplied by (prod) the calculated evaluation. 
+to-report fuzzy-prod-rule [$l $conseq]
+  let $evaluation [$single-evaluation first $l] of last $l 
+  report ifelse-value ($evaluation = $undefined-degree-of-membership) [fuzzy-empty-set] [fuzzy-prod $conseq $evaluation]
+end
+
+;; fuzzy-and-rule [list-of-2-item-lists consequent-fuzzy-set]
+ ;; The first parameter is a list of 2-item lists.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates each value in its corresponding fuzzy set, calculates the minimum 
+ ;; over all evaluations and returns the consequent fuzzy set truncated by the calculated minimum. 
+to-report fuzzy-and-rule [$l $conseq]
+  report fuzzy-min-truncate-rule $l $conseq
+end
+
+;; fuzzy-min-truncate-rule [list-of-2-item-lists consequent-fuzzy-set]
+ ;; The first parameter is a list of 2-item lists.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates each value in its corresponding fuzzy set, calculates the minimum 
+ ;; over all evaluations and returns the consequent fuzzy set truncated by the calculated minimum. 
+to-report fuzzy-min-truncate-rule [$l $conseq]
+  let $evaluations map [[$single-evaluation first ?] of last ?] $l 
+  let $filtered-evaluations filter [? != $undefined-degree-of-membership] $evaluations
+  ifelse length $filtered-evaluations < length $evaluations [
+    show (word "There is at least one undefined value in the antecedents of the fuzzy-min-truncate-rule: " $evaluations ". Empty set returned") 
+    report fuzzy-empty-set
+  ]
+  [ report fuzzy-truncate $conseq (min $filtered-evaluations)]
+end
+
+;; fuzzy-min-prod-rule [list-of-2-item-lists consequent-fuzzy-set]
+ ;; The first parameter is a list of 2-item lists.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates each value in its corresponding fuzzy set, calculates the minimum 
+ ;; over all evaluations and returns the consequent fuzzy set multiplied (fuzzy-prod) by the calculated minimum. 
+to-report fuzzy-min-prod-rule [$l $conseq]
+  let $evaluations map [[$single-evaluation first ?] of last ?] $l 
+  let $filtered-evaluations filter [? != $undefined-degree-of-membership] $evaluations
+  ifelse length $filtered-evaluations < length $evaluations [
+    show (word "There is at least one undefined value in the antecedents of the fuzzy-min-prod-rule: " $evaluations ". Empty set returned") 
+    report fuzzy-empty-set
+  ]
+  [ report fuzzy-prod $conseq (min $filtered-evaluations)]
+end
+
+;; fuzzy-or-rule [list-of-2-item-lists consequent-fuzzy-set]
+ ;; The first parameter is a list of 2-item lists.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates each value in its corresponding fuzzy set, calculates the maximum 
+ ;; over all evaluations and returns the consequent fuzzy set truncated by the calculated maximum. 
+to-report fuzzy-or-rule [$l $conseq]
+  report fuzzy-max-truncate-rule $l $conseq
+end
+
+;; fuzzy-max-truncate-rule [list-of-2-item-lists consequent-fuzzy-set]
+ ;; The first parameter is a list of 2-item lists.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates each value in its corresponding fuzzy set, calculates the maximum 
+ ;; over all evaluations and returns the consequent fuzzy set truncated by the calculated maximum. 
+to-report fuzzy-max-truncate-rule [$l $conseq]
+  let $evaluations map [[$single-evaluation first ?] of last ?] $l 
+  let $filtered-evaluations filter [? != $undefined-degree-of-membership] $evaluations
+  ifelse length $filtered-evaluations < length $evaluations [
+    show (word "There is at least one undefined value in the antecedents of the fuzzy-max-truncate-rule: " $evaluations ". Empty set returned") 
+    report fuzzy-empty-set
+  ]
+  [ report fuzzy-truncate $conseq (max $filtered-evaluations)]
+end
+
+;; fuzzy-max-prod-rule [list-of-2-item-lists consequent-fuzzy-set]
+ ;; The first parameter is a list of 2-item lists.
+ ;; The first item (number or fuzzy set) is the value that will be evaluated in the second item (fuzzy-set).
+ ;; The second parameter is a fuzzy set.
+ ;; This function evaluates each value in its corresponding fuzzy set, calculates the maximum 
+ ;; over all evaluations and returns the consequent fuzzy set multiplied (fuzzy-prod) by the calculated maximum. 
+to-report fuzzy-max-prod-rule [$l $conseq]
+  let $evaluations map [[$single-evaluation first ?] of last ?] $l 
+  let $filtered-evaluations filter [? != $undefined-degree-of-membership] $evaluations
+  ifelse length $filtered-evaluations < length $evaluations [
+    show (word "There is at least one undefined value in the antecedents of the fuzzy-max-prod-rule: " $evaluations ". Empty set returned") 
+    report fuzzy-empty-set
+  ]
+  [ report fuzzy-prod $conseq (max $filtered-evaluations)]
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SUPPORTING FUNCTIONS ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to-report $and-interval [$a $b]
+  if length $a = 0 or length $b = 0 [report []]
+  let $a1 (first $a)
+  let $a2 (last $a)
+  let $b1 (first $b)
+  let $b2 (last $b)
+  let $c1 ifelse-value ($a1 > $b1) [$a1][$b1]
+  let $c2 ifelse-value ($a2 < $b2) [$a2][$b2]
+  report ifelse-value ($c1 < $c2) [(list $c1 $c2)][[]]
+  
+end
+
+to-report $or-interval [$a $b]
+  if length $a = 0 or length $b = 0 [report []]
+  let $a1 (first $a)
+  let $a2 (last $a)
+  let $b1 (first $b)
+  let $b2 (last $b)
+  report (list ifelse-value ($a1 < $b1) [$a1][$b1] ifelse-value ($a2 > $b2) [$a2][$b2])
+end
+
+to-report $intersection [$l1 $l2]
+  report $l1 with [member? self $l2]
+end
+
+to $check-string [$l]
+  if not is-string? $l [user-message (word "Error when trying to create Fuzzy Set " $l ".\nThe first parameter " $l " must be a string.") stop]
+end
+
+to $check-list-of-points [$p] 
+  if not is-list? $p [user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list.") stop]
+  foreach $p [
+    if not is-list? ? [
+      user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list of lists.\n" ? " is not a list.") stop
+    ]
+    if (length ? != 2) or (not is-number? first ?) or (not is-number? last ?) [
+      user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list of lists of 2 numbers.\n" ? " is not a list of two numbers.") stop
+    ]
+    if last ? < 0 or last ? > 1 [
+      user-message (word "Error when trying to create Fuzzy Set.\nParameter " $p " must be a list of lists of 2 numbers,\nwith the second number in each list in the interval [0,1].\n" last ? " is not in the nterval [0,1].") stop
+    ]
+  ]
+end
+
+to-report $horizontal-projection-of-point-on-segment [$a $l]
+  let $first-point first $l
+  let $second-point last $l
+  let a1 first $a
+  
+  report ifelse-value (first $first-point = first $second-point) 
+  [ifelse-value (a1 = first $first-point) [$l][[]]]
+  [ 
+    ifelse-value (a1 = first $second-point)
+      [list a1 (last $second-point)]
+      [(list a1 ((last $first-point) + (( a1 - first $first-point) / (first $second-point - first $first-point)) * (last $second-point - last $first-point) ) )]
+      ;; In real arithmetic we would not need the last ifelse above, but it turns out that in floating point arithmetic you can have:
+      ;; ((last $first-point) + (last $second-point - last $first-point) ) != last $second-point
+      ;; show 0.2696406352181899 + (0.821268455690901 - 0.2696406352181899) =  0.8212684556909011
+  ]
+  ;; Also, it is important to write the equation above as it is because otherwise you can get nasty floating point issues.
+  ;; I had written it in another way before, and I get this nasty answer:
+  ;; $horizontal-projection-of-point-on-segment [5.830077720022926 0.35680051817660785] [[4.169922279977075 0.35680051817660785] [5.830077720022926 0.7341085727324831]]
+  ;; RESULT: [5.830077720022926 0.7341085727324832]
+end
+
+
+
+to-report $intersection-point [$sa $sb]
+  ;; it is assumed that (first $sa1) is equal to (first $sb1),
+  ;; that (last $sa1) is greater than (last $sb1),
+  ;; that (first $sa2) is equal to (first $sb2),
+  ;; and that (last $sa2) is less than (last $sb2)
+  let $sa1 first $sa
+  let $sa2 last $sa
+  let $sb1 first $sb
+  let $sb2 last $sb
+  let $y ((last $sb2 * last $sa1) - (last $sa2 * last $sb1)) / ((last $sa1 - last $sb1) + (last $sb2 - last $sa2))
+  report ifelse-value (last $sb2 = last $sb1) 
+    [(list (first $sa1 + ((first $sa2 - first $sa1) * (last $sa1 - last $sb2) / (last $sa1 - last $sa2))) last $sb2)] 
+    [(list (first $sa1 + ((first $sa2 - first $sa1) * ($y - last $sb1) / (last $sb2 - last $sb1))) $y)]
+end
+
+to-report $homogenise-functions [$line-one $line-two]
+  ;; Set a common starting point and a common end point in x,
+  ;; taking into account where both functions are defined.
+  
+  ;; call the line that starts first: la
+  let $la ifelse-value (first first $line-one <= first first $line-two) [$line-one][$line-two]
+  let $lb ifelse-value (first first $line-one <= first first $line-two) [$line-two][$line-one]
+  
+  let $first-mutual-point first $lb
+  let $x-first-mutual-point first $first-mutual-point
+  let $new-la []
+  
+  ifelse first first $la < $x-first-mutual-point 
+  [
+    let $segment-at-first-mutual-point []
+    foreach $la [
+      ifelse (first ? < $x-first-mutual-point) 
+        [ set $segment-at-first-mutual-point (list ?) ]
+        [
+           if (length $segment-at-first-mutual-point = 1) [
+             set $segment-at-first-mutual-point lput ? $segment-at-first-mutual-point
+           ]
+           set $new-la lput ? $new-la
+        ]
+    ]  
+    if length $segment-at-first-mutual-point = 0 or $new-la = [] [report []]
+    let $projection ifelse-value (length $segment-at-first-mutual-point = 1) 
+    [first $segment-at-first-mutual-point]
+    [$horizontal-projection-of-point-on-segment $first-mutual-point $segment-at-first-mutual-point]  
+    if $projection != first $new-la [set $new-la fput $projection $new-la]
+  ]
+  [ set $new-la $la ]
+  
+  ;; Now call the line that ends last: ll
+  let $ll ifelse-value (first last $new-la >= first last $lb) [$new-la][$lb]
+  let $lf ifelse-value (first last $new-la >= first last $lb) [$lb][$new-la]
+  
+  let $last-mutual-point last $lf
+  let $x-last-mutual-point first $last-mutual-point
+  let $new-ll []
+  
+  ifelse $x-last-mutual-point < first last $ll [
+    let $segment-at-last-mutual-point []
+    foreach $ll [
+      ifelse (first ? <= $x-last-mutual-point) 
+        [ 
+          set $new-ll lput ? $new-ll
+          set $segment-at-last-mutual-point (list ?) 
+        ]
+        [
+           if (length $segment-at-last-mutual-point = 1) [
+             set $segment-at-last-mutual-point lput ? $segment-at-last-mutual-point
+           ]
+           
+        ]
+    ]    
+    if length $segment-at-last-mutual-point = 0 or $new-ll = [] [report []]
+    let $projection ifelse-value (length $segment-at-last-mutual-point = 1) 
+    [first $segment-at-last-mutual-point]
+    [$horizontal-projection-of-point-on-segment $last-mutual-point $segment-at-last-mutual-point]  
+    if $projection != last $new-ll [set $new-ll lput $projection $new-ll]  
+  ]
+  [ set $new-ll $ll]
+  
+  report (list $new-ll $lf)  
+end  
+
+to-report $homogenise-functions-outside [$line-one $line-two]
+  ;; Set a common starting point and a common end point in x
+  ;; taking into account where at least one function is defined.
+  
+  ;; call the line that starts first: la
+  let $la ifelse-value (first first $line-one <= first first $line-two) [$line-one][$line-two]
+  let $lb ifelse-value (first first $line-one <= first first $line-two) [$line-two][$line-one]
+  
+  let $first-mutual-point first $lb
+  let $x-first-mutual-point first $first-mutual-point
+  if first first $la < $x-first-mutual-point [
+    if (last $first-mutual-point != 0) [set $lb fput (list $x-first-mutual-point 0) $lb]
+    set $lb fput (list (first first $la) 0) $lb
+  ]
+  
+  ;; Now call the line that ends last: ll
+  let $ll ifelse-value (first last $la >= first last $lb) [$la][$lb]
+  let $lf ifelse-value (first last $la >= first last $lb) [$lb][$la]
+  
+  let $last-mutual-point last $lf
+  let $x-last-mutual-point first $last-mutual-point
+  if $x-last-mutual-point < first last $ll [
+    if last $last-mutual-point != 0 [set $lf lput (list $x-last-mutual-point 0) $lf]
+    set $lf lput (list (first last $ll) 0) $lf
+  ]
+
+  report (list $ll $lf)  
+end  
+
+to-report $upper-envelope [$line-one $line-two]
+  let $l $homogenise-functions $line-one $line-two
+  if length $l < 2 [report $l]
+  let $la first $l
+  let $lb last $l
+  
+  let $sa sublist $la 0 ifelse-value (length $la < 2) [length $la][2]
+  set $la ifelse-value (length $la < 2) [[]] [sublist $la 2 (length $la)] 
+  
+  let $sb sublist $lb 0 ifelse-value (length $lb < 2) [length $lb][2]
+  set $lb ifelse-value (length $lb < 2) [[]] [sublist $lb 2 (length $lb)] 
+
+
+  let $segments-and-envelope $recursive-upper-envelope $sa $sb $la $lb []
+  report remove-duplicates last $segments-and-envelope
+  ;; I include remove-duplicates because there are pathological cases,
+  ;; e.g. $upper-envelope [[7 0.7] [7 0.9]] [[7 0.2] [7 0.8]]
+  ;; where upper-envelope could have duplicates.
+  ;; This is not an issue, so if efficiency is critical, feel free to remove
+  ;; remove-duplicates
+end
+
+to-report $recursive-upper-envelope [$sa $sb $la $lb $env]
+  let $sa1 0 let $sa2 0 
+  let $sb1 0 let $sb2 0 
+  
+  ;; $sa1 will be the upper point; $sb1 the lower one
+  ifelse last first $sa >= last first $sb 
+    [
+      set $sa1 first $sa
+      set $sa2 last $sa
+      set $sb1 first $sb
+      set $sb2 last $sb
+    ]
+    [ 
+      ;; reverse, so $sa1 is the higher point
+      set $sa1 first $sb
+      set $sa2 last $sb  
+      set $sb1 first $sa
+      set $sb2 last $sa 
+      let $tmp length $sa
+      
+      set $sa (list $sa1) if (length $sb > 1)[set $sa lput $sa2 $sa]
+      set $sb (list $sb1) if ($tmp > 1)[set $sb lput $sb2 $sb]
+      
+      let $temp $la
+      set $la $lb
+      set $lb $temp 
+    ]
+  
+  ;; It is assumed that the envelope does not include any of the points
+  ;; sent as an input, so include the higher one
+  
+  set $env lput $sa1 $env
+     
+  ;; We can start now 
+   
+  ;; Deal with degenerate cases first
+  
+  if (length $sa = 2) and (first $sa1 = first $sa2) [
+    set $sa but-first $sa
+    if (length $la > 0) [
+      set $sa lput (first $la) $sa
+      set $la (but-first $la)
+    ]
+    report $recursive-upper-envelope $sa $sb $la $lb $env
+  ]
+  
+  if (length $sb = 2) and (first $sb1 = first $sb2) [
+    set $sb but-first $sb
+    if (length $lb > 0) [
+      set $sb lput (first $lb) $sb
+      set $lb (but-first $lb)
+    ]
+    report $recursive-upper-envelope $sa $sb $la $lb $env
+  ]
+
+  ;; Deal with the normal case now
+  
+  if (length $sa = 2 and length $sb = 2) 
+  [   
+    let $state $advance-points $sa $sb $la $lb $env
+    set $sa item 0 $state
+    set $sb item 1 $state
+    set $la item 2 $state
+    set $lb item 3 $state
+    set $env item 4 $state
+    report $recursive-upper-envelope $sa $sb $la $lb $env
+  ]
+    
+  ;; NOT (length sa = 2 and length sb = 2)         
+  ifelse (length $sa = 1) 
+    [ 
+      if (last first $sa = last first $sb) or (length $sb = 1) [set $sb but-first $sb]
+      set $env sentence $env (sentence $sb $lb)
+    ]
+    [  
+      set $env sentence $env (fput (last $sa) $la)
+    ]    
+  report (list $sa $sb $la $lb $env)
+end
+
+
+to-report $advance-points [$sa $sb $la $lb $env]
+  
+  let $sa1 first $sa
+  let $sa2 last $sa
+  let $sb1 first $sb
+  let $sb2 last $sb
+  
+  ifelse (last $sa1 = last $sb1) 
+  [
+    ifelse (first $sa2 <= first $sb2) 
+    [
+      ;; $sa2 is closer than $sb2
+      let $projection $horizontal-projection-of-point-on-segment $sa2 $sb  
+      set $sb fput $projection but-first $sb
+      if ($projection = last $sb) [
+        set $sb but-first $sb
+        if (length $lb > 0) [
+          set $sb lput (first $lb) $sb
+          set $lb (but-first $lb)
+        ]
+      ]
+      set $sa but-first $sa
+      if (length $la > 0) [
+        set $sa lput (first $la) $sa
+        set $la (but-first $la)
+      ]
+    ]
+    [
+      ;; $sb2 is closer than $sa2
+      let $projection $horizontal-projection-of-point-on-segment $sb2 $sa 
+      set $sa fput $projection but-first $sa
+      if ($projection = last $sa) [
+        set $sa but-first $sa
+        if (length $la > 0) [
+          set $sa lput (first $la) $sa
+          set $la (but-first $la)
+        ]
+      ]
+      set $sb but-first $sb
+      if (length $lb > 0) [
+        set $sb lput (first $lb) $sb
+        set $lb (but-first $lb)
+      ]
+    ]
+  ]
+  
+  [ ;; (last $sa1 != last $sb1). (The two departing points are different)
+  ifelse (first $sa2 < first $sb2) 
+    [
+      ;; $sa2 is closer than $sb2    
+      let $projection $horizontal-projection-of-point-on-segment $sa2 $sb 
+      ifelse (last $sa2 >= last $projection) 
+      [
+        ;; There is no intersection
+        ;; Advance sa
+        set $sa but-first $sa
+        if (length $la > 0) [
+          set $sa lput (first $la) $sa
+          set $la (but-first $la)
+        ]
+        set $sb fput $projection but-first $sb
+        if ($projection = last $sb) [
+          ;; Advance sb
+          set $sb but-first $sb
+          if (length $lb > 0) [
+            set $sb lput (first $lb) $sb
+            set $lb (but-first $lb)
+          ]
+        ]     
+      ]
+      [
+        ;; There is distinct intersection  
+        let $i-p $intersection-point $sa (list $sb1 $projection)
+        set $sa fput $i-p but-first $sa
+        set $sb fput $i-p but-first $sb
+      ]
+    ]
+    [
+      ;; $sb2 is closer than $sa2
+      let $projection $horizontal-projection-of-point-on-segment $sb2 $sa 
+      ifelse (last $sb2 <= last $projection) 
+      [
+        ;; There is no intersection
+        ;; Advance sb
+        set $sb but-first $sb
+        if (length $lb > 0) [
+          set $sb lput (first $lb) $sb
+          set $lb (but-first $lb)
+        ]
+        set $sa fput $projection but-first $sa
+        if ($projection = last $sa) [
+          ;; Advance sa
+          set $sa but-first $sa
+          if (length $la > 0) [
+            set $sa lput (first $la) $sa
+            set $la (but-first $la)
+          ]
+        ]
+      ]
+      [
+        ;; There is distinct intersection  
+        let $i-p $intersection-point (list $sa1 $projection) $sb
+        set $sa fput $i-p but-first $sa
+        set $sb fput $i-p but-first $sb
+      ]
+    ]
+  ]
+  
+  report (list $sa $sb $la $lb $env)
+end
+
+to-report $lower-envelope [$line-one $line-two]
+  let $l $homogenise-functions $line-one $line-two
+  if length $l < 2 [report $l]
+  
+  let $la first $l
+  let $lb last $l
+  
+  let $sa sublist $la 0 ifelse-value (length $la < 2) [length $la][2]
+  set $la ifelse-value (length $la < 2) [[]] [sublist $la 2 (length $la)] 
+  
+  let $sb sublist $lb 0 ifelse-value (length $lb < 2) [length $lb][2]
+  set $lb ifelse-value (length $lb < 2) [[]] [sublist $lb 2 (length $lb)] 
+
+  let $segments-and-envelope $recursive-lower-envelope $sa $sb $la $lb []
+  report remove-duplicates last $segments-and-envelope
+  ;; I include remove-duplicates because there are pathological cases,
+  ;; e.g. $lower-envelope [[7 0.7] [7 0.9]] [[7 0.2] [7 0.8]]
+  ;; where lower-envelope could have duplicates.
+  ;; This is not an issue, so if efficiency is critical, feel free to remove
+  ;; remove-duplicates
+end
+  
+to-report $recursive-lower-envelope [$sa $sb $la $lb $env]
+  let $sa1 0 let $sa2 0 
+  let $sb1 0 let $sb2 0 
+  
+  ;; $sa1 will be the upper point; $sb1 the lower one
+  ifelse last first $sa >= last first $sb 
+    [
+      set $sa1 first $sa
+      set $sa2 last $sa
+      set $sb1 first $sb
+      set $sb2 last $sb
+    ]
+    [ 
+      ;; reverse, so $sa1 is the higher point
+      set $sa1 first $sb
+      set $sa2 last $sb  
+      set $sb1 first $sa
+      set $sb2 last $sa 
+      let $tmp length $sa
+      
+      set $sa (list $sa1) if (length $sb > 1)[set $sa lput $sa2 $sa]
+      set $sb (list $sb1) if ($tmp > 1)[set $sb lput $sb2 $sb]
+      
+      let $temp $la
+      set $la $lb
+      set $lb $temp 
+    ]
+  
+  ;; It is assumed that the envelope does not include any of the points
+  ;; sent as an input, so include the lower one
+  
+  set $env lput $sb1 $env
+  ;; We can start now  
+  
+  ;show (word "1. sa " $sa "; la " $la "; sb " $sb "; lb " $lb "; env " $env )
+  
+  ;; Deal with degenerate cases first
+  
+  if (length $sa = 2) and (first $sa1 = first $sa2) [
+    set $sa but-first $sa
+    if (length $la > 0) [
+      set $sa lput (first $la) $sa
+      set $la (but-first $la)
+    ]
+    ;show (word "1A. sa " $sa "; la " $la "; sb " $sb "; lb " $lb "; env " $env )
+    report $recursive-lower-envelope $sa $sb $la $lb $env
+  ]
+ 
+  if (length $sb = 2) and (first $sb1 = first $sb2) [
+    set $sb but-first $sb
+    if (length $lb > 0) [
+      set $sb lput (first $lb) $sb
+      set $lb (but-first $lb)
+    ]
+    ;show (word "1B. sa " $sa "; la " $la "; sb " $sb "; lb " $lb "; env " $env )
+    report $recursive-lower-envelope $sa $sb $la $lb $env
+  ]
+  
+  ;; Deal with the normal case now
+  
+  if (length $sa = 2 and length $sb = 2) 
+  [   
+    let $state $advance-points $sa $sb $la $lb $env
+    set $sa item 0 $state
+    set $sb item 1 $state
+    set $la item 2 $state
+    set $lb item 3 $state
+    set $env item 4 $state
+    report $recursive-lower-envelope $sa $sb $la $lb $env
+  ]  
+   
+  ;; NOT (length sa = 2 and length sb = 2)         
+  ifelse (length $sb = 1) 
+    [ 
+      if (last first $sa = last first $sb) or (length $sa = 1) [set $sa but-first $sa]
+      set $env sentence $env (sentence $sa $la)
+    ]
+    [  
+      set $env sentence $env (fput (last $sb) $lb)
+    ]    
+    
+  ;show (word "2. sa " $sa "; la " $la "; sb " $sb "; lb " $lb "; env " $env )
+  report (list $sa $sb $la $lb $env)   
+end
+
+to-report $clip-no-greater-than-1 [$n]
+  report ifelse-value ($n > 1) [1][$n]
+end
+
+
